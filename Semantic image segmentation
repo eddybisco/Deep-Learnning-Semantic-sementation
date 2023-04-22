@@ -1,0 +1,304 @@
+import numpy as np
+import tensorflow as tf
+from tensorflow import keras
+from tensorflow.keras import layers
+from tensorflow.keras.optimizers import Adam
+from matplotlib import pyplot as pl
+from sklearn.model_selection import train_test_split
+from patchify import patchify
+import tifffile as tiff
+import glob
+import datetime
+# Data Augumentation
+fn_patch_train = glob.glob("train_rgb/*.tif")
+
+fn_patch_label = glob.glob("label/*.tif")
+fn_patch_train.sort()
+fn_patch_label.sort()
+print(fn_patch_label[:3])
+print(fn_patch_train[:3])
+
+n = len(fn_patch_train)
+for k in range(n):
+    train = tiff.imread(fn_patch_train[k])
+    label = tiff.imread(fn_patch_label[k])
+    fg, ax = pl.subplots(1, 1, figsize=(7, 7), dpi=170)
+    ax.set_title(fn_patch_label[k])
+    ax.imshow(train)
+    ax.imshow(label > 0, cmap="gray", alpha=0.5)
+    pl.show()
+    
+    #Patchify 512 px patches to smaller patches:
+ n = len(fn_patch_train)
+img_base_size = 512
+img_size = 128
+m = (img_base_size // img_size) ** 2
+
+data_train = np.zeros((n * m, img_size, img_size, 3))
+data_label = np.zeros((n * m, img_size, img_size))
+
+for k in range(n):
+    patches_train = patchify(
+        tiff.imread(fn_patch_train[k]), (img_size, img_size, 3), step=img_size
+    )
+    patches_label = patchify(
+        tiff.imread(fn_patch_label[k]), (img_size, img_size), step=img_size
+    )
+    data_train[k * m : (k + 1) * m, :, :, :] = patches_train.reshape(
+        -1, img_size, img_size, 3
+    )
+    data_label[k * m : (k + 1) * m, :, :] = patches_label.reshape(
+        -1, img_size, img_size
+    )
+
+data_label = (data_label > 0).astype("int")
+data_label = np.expand_dims(data_label, axis=-1)
+print(data_train.max(), data_label.max())
+data_train = data_train.astype("float") / 255
+print(data_train.max(), data_label.max())
+print(data_train.shape, data_label.shape)
+
+x_train, x_test, y_train, y_test = train_test_split(
+    data_train, data_label, test_size=0.2, random_state=157
+)
+# Manual data Augumentation
+data_augmentation = keras.Sequential(
+    [
+        layers.experimental.preprocessing.RandomFlip("horizontal_and_vertical"),
+        layers.experimental.preprocessing.RandomRotation(0.5),
+    ]
+)
+# the number of loops for augmentation
+n = 3
+
+shape = list(x_train.shape)
+m = shape[0]
+shape[0] = m * n
+new_x_train = np.zeros(shape)
+shape[3] = 1
+new_y_train = np.zeros(shape)
+
+for k in range(n):
+    batch = tf.cast(x_train, tf.float32)
+    new_x_train[k * m : (k + 1) * m] = data_augmentation(batch).numpy()
+    new_y_train[k * m : (k + 1) * m] = y_train.copy()
+
+x_train, y_train = new_x_train, new_y_train
+
+k = np.random.randint(0, len(x_train) - 1)
+
+fg, ax = pl.subplots(1, 2, figsize=(11, 5), dpi=170)
+ax[0].imshow(x_train[k, :, :, :])
+ax[1].imshow(y_train[k, :, :, 0], cmap="gray")
+pl.show()
+
+# flatten the label image
+y_train = y_train.reshape(y_train.shape[0], -1)
+y_test = y_test.reshape(y_test.shape[0], -1)
+print(y_train.shape)
+
+# count the number of positive pixels
+y_train = y_train.sum(axis=1)
+y_test = y_test.sum(axis=1)
+
+# turn into binary two-class vector
+y_train = keras.utils.to_categorical((y_train > 10).astype("int"), 2)
+y_test = keras.utils.to_categorical((y_test > 10).astype("int"), 2)
+print(y_train.shape)
+print(y_train.sum(axis=0) / y_train.shape[0])
+
+input_shape = x_train[0].shape
+print(input_shape)
+
+model = tf.keras.Sequential(
+    [
+        keras.Input(shape=input_shape),
+        # data_augmentation,
+        # layers.Conv2D(16, 3, padding="same", activation="relu"),
+        # layers.MaxPooling2D(),
+        layers.Conv2D(32, 3, padding="same", activation="relu"),
+        layers.MaxPooling2D(),
+        layers.Conv2D(64, 3, padding="same", activation="relu"),
+        layers.MaxPooling2D(),
+        layers.Flatten(),
+        layers.Dropout(0.5),
+        layers.Dense(2, activation="softmax"),
+    ]
+)
+
+model.summary()
+
+Synthesisbatch_size = 64
+epochs = 100
+# eta = 0.02
+
+model.compile(
+    # optimizer=Adam(learning_rate=eta),
+    optimizer="adam",
+    loss="categorical_crossentropy",
+    metrics=["accuracy"],
+)
+
+# log_dir = "logs/fit/" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+# tensorboard_callback = tf.keras.callbacks.TensorBoard(log_dir=log_dir, histogram_freq=1)
+
+history = model.fit(
+    x_train,
+    y_train,
+    batch_size=batch_size,
+    epochs=epochs,
+    validation_data=(x_test, y_test),
+    # callbacks=[tensorboard_callback],
+)
+
+loss = history.history["loss"]
+val_loss = history.history["val_loss"]
+epochs = range(1, len(loss) + 1)
+
+acc = history.history["accuracy"]
+val_acc = history.history["val_accuracy"]
+
+fg, ax = pl.subplots(1, 2, figsize=(11, 5), dpi=170)
+ax[0].plot(epochs, loss, "y", label="Training loss")
+ax[0].plot(epochs, val_loss, "r", label="Validation loss")
+ax[0].set_title("Training and validation loss")
+ax[0].set_xlabel("Epochs")
+ax[0].set_ylabel("Loss")
+ax[0].legend()
+
+ax[1].plot(epochs, acc, "y", label="Training acc")
+ax[1].plot(epochs, val_acc, "r", label="Validation acc")
+ax[1].set_title("Training and validation accuracy")
+ax[1].set_xlabel("Epochs")
+ax[1].set_ylabel("Accuracy")
+ax[1].legend()
+pl.show()
+
+#Building a  U-Net:
+from tensorflow.keras.models import Model
+from tensorflow.keras.layers import Input, Conv2D, MaxPooling2D, UpSampling2D, concatenate, Conv2DTranspose, BatchNormalization, Dropout, Lambda
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.layers import Activation, MaxPool2D, Concatenate
+
+
+def conv_block(input, num_filters):
+    x = Conv2D(num_filters, 3, padding="same")(input)
+    x = BatchNormalization()(x)
+    x = Activation("relu")(x)
+    x = Conv2D(num_filters, 3, padding="same")(x)
+    x = BatchNormalization()(x)
+    x = Activation("relu")(x)
+    return x
+
+def encoder_block(input, num_filters):
+    x = conv_block(input, num_filters)
+    p = MaxPool2D((2, 2))(x)
+    return x, p   
+
+def decoder_block(input, skip_features, num_filters):
+    x = Conv2DTranspose(num_filters, (2, 2), strides=2, padding="same")(input)
+    x = Concatenate()([x, skip_features])
+    x = conv_block(x, num_filters)
+    return x
+
+def build_unet(input_shape):
+    inputs = Input(input_shape)
+    s1, p1 = encoder_block(inputs, 64)
+    s2, p2 = encoder_block(p1, 128)
+    s3, p3 = encoder_block(p2, 256)
+    s4, p4 = encoder_block(p3, 512)
+    b1 = conv_block(p4, 1024)
+    d1 = decoder_block(b1, s4, 512)
+    d2 = decoder_block(d1, s3, 256)
+    d3 = decoder_block(d2, s2, 128)
+    d4 = decoder_block(d3, s1, 64)
+    outputs = Conv2D(1, 1, padding="same", activation="sigmoid")(d4)
+    model = Model(inputs, outputs, name="U-Net")
+    return model
+    
+    input_shape = x_train.shape[1:]
+
+model = build_unet(input_shape)
+model.compile(optimizer=Adam(learning_rate = 1e-2), loss="binary_crossentropy", metrics=["accuracy"])
+model.summary()
+
+tf.keras.utils.plot_model(model, show_shapes=True)
+
+batch_size = 16
+epochs = 50
+# eta = 0.02
+
+model.compile(
+    # optimizer=Adam(learning_rate=eta),
+    optimizer="adam",
+    loss="categorical_crossentropy",
+    metrics=["accuracy"],
+)
+
+# log_dir = "logs/fit/" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+# tensorboard_callback = tf.keras.callbacks.TensorBoard(log_dir=log_dir, histogram_freq=1)
+
+history = model.fit(
+    x_train,
+    y_train,
+    batch_size=batch_size,
+    epochs=epochs,
+    validation_data=(x_test, y_test),
+    # callbacks=[tensorboard_callback],
+)
+
+loss = history.history["loss"]
+val_loss = history.history["val_loss"]
+epochs = range(1, len(loss) + 1)
+
+acc = history.history["accuracy"]
+val_acc = history.history["val_accuracy"]
+
+fg, ax = pl.subplots(1, 2, figsize=(11, 5), dpi=170)
+ax[0].plot(epochs, loss, "y", label="Training loss")
+ax[0].plot(epochs, val_loss, "r", label="Validation loss")
+ax[0].set_title("Training and validation loss")
+ax[0].set_xlabel("Epochs")
+ax[0].set_ylabel("Loss")
+ax[0].legend()
+
+ax[1].plot(epochs, acc, "y", label="Training acc")
+ax[1].plot(epochs, val_acc, "r", label="Validation acc")
+ax[1].set_title("Training and validation accuracy")
+ax[1].set_xlabel("Epochs")
+ax[1].set_ylabel("Accuracy")
+ax[1].legend()
+pl.show()
+
+# Save the model for future use
+model.save("model_rgb.hdf5")
+
+#Model evaluation
+from keras.models import load_model
+model = load_model("model_rgb.hdf5", compile=False)
+
+y_pred = model.predict(X_test)
+
+# Convert sigmoid probability to classification
+y_pred_thresholded = y_pred > 0.5
+
+from tensorflow.keras.metrics import MeanIoU
+
+IOU_keras = MeanIoU(num_classes=2)  
+IOU_keras.update_state(y_pred_thresholded, y_test)
+print("Mean IoU =", IOU_keras.result().numpy())
+
+threshold = 0.5
+k = np.random.randint(0, len(X_test)-1)
+
+test_img = X_test[k]
+ground_truth = y_test[k]
+prediction = model.predict(np.expand_dims(test_img, 0))[0,:,:,0]
+
+fg, ax = pl.subplots(1, 3, figsize=(11, 5), dpi=170)
+ax[0].set_title('Testing Image')
+ax[0].imshow(test_img)
+ax[1].set_title('Testing Label')
+ax[1].imshow(ground_truth[:,:,0], cmap='gray')
+ax[2].set_title('Prediction on test image')
+ax[2].imshow(prediction)
